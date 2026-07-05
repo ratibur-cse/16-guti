@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>ষোল গুটি | Sholo Guti</title>
+<title>ষোল গুটি | Sholo Guti Online</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
@@ -49,6 +49,8 @@
   .modeBtn:hover, .colorBtn:hover { border-color:#e8b25a; }
   .swatch { width: 36px; height: 36px; border-radius: 50%; border: 2px solid rgba(255,255,255,.5); }
   .modeIcon { font-size: 30px; }
+  #joinCodeInput { font-size:22px;text-align:center;letter-spacing:4px;text-transform:uppercase;padding:10px;border-radius:8px;border:2px solid #6a4a28;background:#1f130a;color:#f0e0c0;width:200px; }
+  .roomCodeBox { font-size:36px;font-weight:bold;letter-spacing:8px;color:#f0c987;background:#1f130a;padding:12px 24px;border-radius:10px;border:2px solid #6a4a28; }
 </style>
 </head>
 <body>
@@ -62,10 +64,28 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.70.0/phaser.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 /* ============================================================
    SHOLO GUTI — board graph, rules (optional capture), AI, render
+   + অনলাইন মাল্টিপ্লেয়ার (Firebase Firestore)
+   + প্রতিটি খেলোয়াড় নিজের ডিভাইসে নিজের গুটি সবসময় নিচে দেখবে (visual flip)
    ============================================================ */
+
+/* ====== Firebase কনফিগারেশন ====== */
+const firebaseConfig = {
+  apiKey: "AIzaSyBf9ZkLHoU8YuORoDXVenDHSWsw36UdsbI",
+  authDomain: "guti-f5b7e.firebaseapp.com",
+  projectId: "guti-f5b7e",
+  storageBucket: "guti-f5b7e.firebasestorage.app",
+  messagingSenderId: "746495217692",
+  appId: "1:746495217692:web:9ad36095ab6a74976e4fd9"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
 
 /* ---------- 1. BOARD GRAPH (topology) ---------- */
 function buildBoard() {
@@ -79,28 +99,19 @@ function buildBoard() {
   }
 
   const lines = [];
-  // main grid: horizontals & verticals
   for (let r = 0; r < 5; r++) lines.push([0,1,2,3,4].map(c => `m_${c}_${r}`));
-  for (let c = 0; c < 5; c++) lines.push([0,1,2,3,4].map(r => `m_${c}_${r}`));
-  // main grid: classic-alquerque diagonals (single diagonal per cell, alternating checkerboard)
+  for (let c = 0; c < 5; c++) { if (c === 2) continue; lines.push([0,1,2,3,4].map(r => `m_${c}_${r}`)); }
   lines.push(['m_0_0','m_1_1','m_2_2','m_3_3','m_4_4']);
-  lines.push(['m_0_2','m_1_3','m_2_4']);
-  lines.push(['m_2_0','m_3_1','m_4_2']);
   lines.push(['m_4_0','m_3_1','m_2_2','m_1_3','m_0_4']);
-  lines.push(['m_2_0','m_1_1','m_0_2']);
-  lines.push(['m_2_4','m_3_3','m_4_2']);
-  // top extension: 3 lines funnel into m_2_0 only (no crossing diagonals)
-  lines.push(['a0','b0','m_2_0']);
-  lines.push(['a1','b1','m_2_0']);
-  lines.push(['a2','b2','m_2_0']);
+  lines.push(['a0','b0','m_2_0','m_3_1','m_4_2']);
+  lines.push(['a2','b2','m_2_0','m_1_1','m_0_2']);
   lines.push(['a0','a1','a2']);
   lines.push(['b0','b1','b2']);
-  // bottom extension: mirror, 3 lines funnel into m_2_4 only
-  lines.push(['e0','d0','m_2_4']);
-  lines.push(['e1','d1','m_2_4']);
-  lines.push(['e2','d2','m_2_4']);
+  lines.push(['e0','d0','m_2_4','m_3_3','m_4_2']);
+  lines.push(['e2','d2','m_2_4','m_1_3','m_0_2']);
   lines.push(['e0','e1','e2']);
   lines.push(['d0','d1','d2']);
+  lines.push(['a1','b1','m_2_0','m_2_1','m_2_2','m_2_3','m_2_4','d1','e1']);
 
   const adj = {}; for (const id in nodes) adj[id] = new Set();
   const captureMap = {};
@@ -263,8 +274,22 @@ let game = {
   selected: null,
   over: false,
   history: [],
-  busy: false
+  busy: false,
+  noCaptureStreak: 0,
+  // অনলাইন মোডের জন্য
+  myColor: null,
+  hostColor: null,
+  roomCode: null,
+  roomRef: null,
+  unsubscribe: null,
+  moveCount: 0,
+  onlineInitialized: false,
+  currentOverlay: null,
+  // ভিজুয়াল ফ্লিপ — true হলে প্রতিটি নোডের স্ক্রিন-পজিশন উল্টে দেখানো হয়,
+  // যাতে অনলাইন গেমে যে কোনো খেলোয়াড় নিজের ডিভাইসে নিজের গুটি সবসময় নিচে দেখে
+  flip: false
 };
+const NO_PROGRESS_DRAW_LIMIT = 30;
 
 function startGame(mode, bottomColor, aiColor) {
   game.mode = mode;
@@ -281,6 +306,9 @@ function startGame(mode, bottomColor, aiColor) {
   game.over = false;
   game.history = [];
   game.busy = false;
+  // লোকাল গেমে ফ্লিপের প্রয়োজন নেই — bottomColor অনুযায়ী বোর্ড আগে থেকেই সঠিকভাবে বানানো হয়
+  game.flip = false;
+  if (scene) { scene.setRoomCode(''); scene.repositionForFlip(); }
   scene && scene.fullRedraw();
   updateHUD('');
   document.getElementById('stopBtn').classList.remove('show');
@@ -295,6 +323,10 @@ function updateHUD(msg) {
   let turnText;
   if (game.over) {
     turnText = msg;
+  } else if (game.mode === 'online') {
+    turnText = (game.fs.player === game.myColor)
+      ? ('আপনার পালা' + (game.fs.forced ? ' — আবার ক্যাপচার করুন বা থামুন' : ''))
+      : 'প্রতিপক্ষের পালা...';
   } else if (game.mode === 'pvp') {
     turnText = (game.fs.player === 'blue' ? 'নীলের পালা' : 'লালের পালা') + (game.fs.forced ? ' — আবার ক্যাপচার করুন বা থামুন' : '');
   } else {
@@ -303,7 +335,8 @@ function updateHUD(msg) {
   }
   scene.setTurnText(turnText);
   const stopBtn = document.getElementById('stopBtn');
-  const showStop = !game.over && !!game.fs.forced && !isAiTurn();
+  const myTurnForStop = game.mode === 'online' ? (game.fs.player === game.myColor) : !isAiTurn();
+  const showStop = !game.over && !!game.fs.forced && myTurnForStop;
   stopBtn.classList.toggle('show', showStop);
 }
 
@@ -329,14 +362,16 @@ function checkGameOver() {
 /* ---- human interaction ---- */
 function humanClickNode(id) {
   if (!game.fs || game.over || game.busy) return;
-  if (isAiTurn()) return;
+  if (game.mode === 'online') { if (game.fs.player !== game.myColor) return; }
+  else if (isAiTurn()) return;
+
   const board = game.fs.board;
   const legal = generateLegalMoves(game.fs);
 
   if (game.fs.forced) {
-    if (id === game.fs.forced) { doMove({type:'stop'}); return; }
+    if (id === game.fs.forced) { performMove({type:'stop'}); return; }
     const mv = legal.find(m => m.type==='capture' && m.to === id);
-    if (mv) doMove(mv);
+    if (mv) performMove(mv);
     return;
   }
 
@@ -350,10 +385,15 @@ function humanClickNode(id) {
 
   if (game.selected) {
     const mv = legal.find(m => m.from === game.selected && m.to === id);
-    if (mv) { doMove(mv); return; }
+    if (mv) { performMove(mv); return; }
   }
   game.selected = null;
   scene.clearHighlights();
+}
+
+function performMove(mv) {
+  if (game.mode === 'online') applyLocalMoveOnline(mv);
+  else doMove(mv);
 }
 
 function doMove(mv) {
@@ -402,6 +442,7 @@ function maybeTriggerAI() {
 }
 
 function undoLastTurn() {
+  if (game.mode === 'online') { alert('অনলাইন মোডে Undo করা যায় না।'); return; }
   if (game.history.length === 0 || game.busy) return;
   let step = game.history.pop();
   game.fs = step.prevFs;
@@ -418,6 +459,206 @@ function undoLastTurn() {
 }
 
 /* ============================================================
+   4b. অনলাইন মাল্টিপ্লেয়ার (Firebase Firestore)
+   ============================================================ */
+function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 5; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+function ensureAuth() {
+  return new Promise((resolve, reject) => {
+    if (firebase.auth().currentUser) return resolve();
+    firebase.auth().signInAnonymously().then(() => resolve()).catch(reject);
+  });
+}
+
+async function createOnlineRoom(hostColor, overlay) {
+  try {
+    await ensureAuth();
+    const uid = firebase.auth().currentUser.uid;
+    let code, ref, exists = true;
+    while (exists) {
+      code = generateRoomCode();
+      ref = db.collection('sholoGutiRooms').doc(code);
+      const snap = await ref.get();
+      exists = snap.exists;
+    }
+    const players = {}; players[hostColor] = { uid };
+    await ref.set({
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      status: 'waiting',
+      hostColor,
+      players,
+      board: null, player: null, forced: null,
+      moveCount: 0, lastMove: null, winner: null
+    });
+    game.mode = 'online'; game.myColor = hostColor; game.hostColor = hostColor; game.roomCode = code;
+    game.moveCount = 0; game.over = false; game.onlineInitialized = false;
+    game.currentOverlay = overlay;
+    showWaitingScreen(overlay, code);
+    listenToRoom(code);
+  } catch (e) {
+    console.error(e);
+    alert('রুম তৈরি করতে সমস্যা হয়েছে। Firebase কনফিগ ঠিক আছে কিনা যাচাই করুন।');
+  }
+}
+
+async function joinOnlineRoom(code, overlay) {
+  const errEl = document.getElementById('joinError');
+  try {
+    await ensureAuth();
+    const uid = firebase.auth().currentUser.uid;
+    const ref = db.collection('sholoGutiRooms').doc(code);
+    let assignedColor = null;
+    let hostColorCaptured = null;
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new Error('NOTFOUND');
+      const data = snap.data();
+      if (data.status !== 'waiting') throw new Error('FULL');
+      hostColorCaptured = data.hostColor;
+      assignedColor = other(data.hostColor);
+      const board = buildInitialBoard(data.hostColor);
+      const players = Object.assign({}, data.players);
+      players[assignedColor] = { uid };
+      tx.update(ref, { players, status: 'active', board, player: data.hostColor, forced: null, moveCount: 0 });
+    });
+    game.mode = 'online'; game.myColor = assignedColor; game.hostColor = hostColorCaptured; game.roomCode = code;
+    game.moveCount = 0; game.over = false; game.onlineInitialized = false;
+    game.currentOverlay = overlay;
+    listenToRoom(code);
+  } catch (e) {
+    console.error(e);
+    if (errEl) errEl.textContent = e.message === 'NOTFOUND' ? 'এই কোডে কোনো রুম পাওয়া যায়নি।' : 'রুমটি পূর্ণ অথবা সমস্যা হয়েছে।';
+  }
+}
+
+function listenToRoom(code) {
+  if (game.unsubscribe) game.unsubscribe();
+  const ref = db.collection('sholoGutiRooms').doc(code);
+  game.roomRef = ref;
+  game.unsubscribe = ref.onSnapshot((snap) => {
+    if (!snap.exists) return;
+    handleRoomUpdate(snap.data());
+  }, (err) => console.error('onSnapshot error', err));
+}
+
+function handleRoomUpdate(data) {
+  if (data.status === 'waiting') return;
+
+  if (!game.onlineInitialized) {
+    if (game.currentOverlay) { game.currentOverlay.remove(); game.currentOverlay = null; }
+    document.getElementById('stopBtn').classList.remove('show');
+    game.fs = { board: data.board, player: data.player, forced: data.forced };
+    game.moveCount = data.moveCount;
+    game.controlledBy = {};
+    game.controlledBy[game.myColor] = 'human';
+    game.controlledBy[other(game.myColor)] = 'remote';
+    game.selected = null;
+    game.over = false;
+    game.onlineInitialized = true;
+    // এখানেই ঠিক হয় ফ্লিপ হবে কিনা — যদি আমার রং হোস্টের রং না হয়,
+    // তাহলে বোর্ড উল্টে দেখানো হবে যাতে আমার গুটি সবসময় নিচে থাকে
+    game.flip = (game.myColor !== data.hostColor);
+    scene.setRoomCode('রুম কোড: ' + game.roomCode);
+    scene.repositionForFlip();
+    scene.fullRedraw();
+    updateHUD('');
+    return;
+  }
+
+  if (data.moveCount > game.moveCount) {
+    if (data.lastMove) applyRemoteMove(data);
+    else {
+      game.fs = { board: data.board, player: data.player, forced: data.forced };
+      game.moveCount = data.moveCount;
+      scene.fullRedraw();
+      updateHUD('');
+    }
+  }
+
+  if (data.status === 'finished' && !game.over) {
+    game.over = true;
+    const msg = data.winner === game.myColor ? '🎉 আপনি জিতেছেন!' : '😢 আপনি হেরেছেন!';
+    updateHUD(msg);
+  }
+}
+
+function applyRemoteMove(data) {
+  const mv = data.lastMove;
+  game.busy = true;
+  scene.animateMove(mv, () => {
+    game.fs = { board: data.board, player: data.player, forced: data.forced };
+    game.moveCount = data.moveCount;
+    game.selected = null;
+    game.busy = false;
+    if (data.status === 'finished') {
+      game.over = true;
+      const msg = data.winner === game.myColor ? '🎉 আপনি জিতেছেন!' : '😢 আপনি হেরেছেন!';
+      updateHUD(msg);
+      scene.fullRedraw();
+      return;
+    }
+    if (game.fs.forced && game.fs.player === game.myColor) {
+      game.selected = game.fs.forced;
+      const legal = generateLegalMoves(game.fs);
+      scene.showSelection(game.fs.forced, legal);
+    } else {
+      scene.clearHighlights();
+    }
+    updateHUD('');
+  });
+}
+
+function applyLocalMoveOnline(mv) {
+  game.busy = true;
+  const ns = applyMove(game.fs, mv);
+  const overMoves = generateLegalMoves(ns);
+  const isOver = overMoves.length === 0;
+  const newMoveCount = game.moveCount + 1;
+  const docUpdate = {
+    board: ns.board, player: ns.player, forced: ns.forced,
+    moveCount: newMoveCount, lastMove: mv,
+    status: isOver ? 'finished' : 'active',
+    winner: isOver ? other(ns.player) : null
+  };
+  game.moveCount = newMoveCount;
+  if (game.roomRef) game.roomRef.update(docUpdate).catch(e => console.error('write failed', e));
+  scene.animateMove(mv, () => {
+    game.fs = ns;
+    game.selected = null;
+    game.busy = false;
+    if (isOver) {
+      game.over = true;
+      const winnerColor = other(ns.player);
+      const msg = winnerColor === game.myColor ? '🎉 আপনি জিতেছেন!' : '😢 আপনি হেরেছেন!';
+      updateHUD(msg);
+      return;
+    }
+    if (ns.forced) {
+      game.selected = ns.forced;
+      const legal = generateLegalMoves(game.fs);
+      scene.showSelection(ns.forced, legal);
+      updateHUD('');
+    } else {
+      scene.clearHighlights();
+      updateHUD('');
+    }
+  });
+}
+
+function leaveOnlineRoom() {
+  if (game.unsubscribe) { game.unsubscribe(); game.unsubscribe = null; }
+  game.roomRef = null; game.roomCode = null; game.myColor = null; game.hostColor = null;
+  game.onlineInitialized = false;
+  game.flip = false;
+  if (scene) { scene.setRoomCode(''); scene.repositionForFlip(); }
+}
+
+/* ============================================================
    5. PHASER RENDERING — 1080x1920 canvas, funnel-shaped board
    ============================================================ */
 const CANVAS_W = 1080, CANVAS_H = 1920;
@@ -425,18 +666,30 @@ const MARGIN_X = 160, SP = 190;
 const COL_X = [MARGIN_X, MARGIN_X+SP, MARGIN_X+2*SP, MARGIN_X+3*SP, MARGIN_X+4*SP];
 const MAIN_ROW0_Y = 620;
 const ROW_Y = [MAIN_ROW0_Y, MAIN_ROW0_Y+SP, MAIN_ROW0_Y+2*SP, MAIN_ROW0_Y+3*SP, MAIN_ROW0_Y+4*SP];
-const OUTER_TOP_Y = 330, INNER_TOP_Y = 470;
-const INNER_BOT_Y = 1530, OUTER_BOT_Y = 1670;
-const OUTER_X = [COL_X[1], COL_X[2], COL_X[3]];
-const INNER_X = [(COL_X[1]+COL_X[2])/2, COL_X[2], (COL_X[2]+COL_X[3])/2];
+const OUTER_TOP_Y = MAIN_ROW0_Y - 2*SP, INNER_TOP_Y = MAIN_ROW0_Y - SP;
+const INNER_BOT_Y = ROW_Y[4] + SP, OUTER_BOT_Y = ROW_Y[4] + 2*SP;
+const OUTER_X = [COL_X[0], COL_X[2], COL_X[4]];
+const INNER_X = [COL_X[1], COL_X[2], COL_X[3]];
 
-function px(id) {
+/* px(id, flip) — flip=true হলে প্রতিটি নোডের স্ক্রিন-পজিশন উল্টে (mirror) দেওয়া হয়:
+   main গ্রিডের সারি r -> 4-r উল্টানো হয়, এবং a<->e, b<->d রিং বদলানো হয়।
+   বোর্ডের লাইন/জোড়া (grid lines/joints) গঠনতান্ত্রিকভাবে top-bottom symmetric,
+   তাই সেগুলো একবারই আঁকা হয় (flip ছাড়া) — শুধু গুটি ও hit-area পজিশন flip অনুযায়ী বদলাতে হয়। */
+function px(id, flip) {
   const n = BOARD.nodes[id];
-  if (n.type === 'main') return { x: COL_X[n.c], y: ROW_Y[n.r] };
-  if (n.type === 'a') return { x: OUTER_X[n.i], y: OUTER_TOP_Y };
-  if (n.type === 'b') return { x: INNER_X[n.i], y: INNER_TOP_Y };
-  if (n.type === 'd') return { x: INNER_X[n.i], y: INNER_BOT_Y };
-  if (n.type === 'e') return { x: OUTER_X[n.i], y: OUTER_BOT_Y };
+  if (n.type === 'main') {
+    const r = flip ? (4 - n.r) : n.r;
+    return { x: COL_X[n.c], y: ROW_Y[r] };
+  }
+  let type = n.type;
+  if (flip) {
+    const mapType = { a:'e', b:'d', d:'b', e:'a' };
+    type = mapType[type];
+  }
+  if (type === 'a') return { x: OUTER_X[n.i], y: OUTER_TOP_Y };
+  if (type === 'b') return { x: INNER_X[n.i], y: INNER_TOP_Y };
+  if (type === 'd') return { x: INNER_X[n.i], y: INNER_BOT_Y };
+  if (type === 'e') return { x: OUTER_X[n.i], y: OUTER_BOT_Y };
 }
 
 const LINE_W = 12, JOINT_R = 8, PIECE_R = 30, PIECE_STROKE = 5, HIT_R = 60, SEL_R = 42, SEL_STROKE = 7, DEST_R = 26, DEST_STROKE = 7, CAP_DEST_COLOR = 0xff8a3d, MOVE_DEST_COLOR = 0x5cff7a;
@@ -470,6 +723,10 @@ class MainScene extends Phaser.Scene {
       fontFamily: 'Segoe UI, sans-serif', fontSize: '38px', fontStyle: 'bold', color: '#ffe9b0'
     }).setOrigin(0.5);
 
+    this.roomCodeText = this.add.text(CANVAS_W/2, 210, '', {
+      fontFamily: 'Segoe UI, sans-serif', fontSize: '26px', color: '#cbb090'
+    }).setOrigin(0.5);
+
     this.blueCountText = this.add.text(150, CANVAS_H-95, 'নীল: 16', {
       fontFamily:'Segoe UI, sans-serif', fontSize:'40px', fontStyle:'bold', color:'#8fb6ff'
     }).setOrigin(0.5);
@@ -481,18 +738,18 @@ class MainScene extends Phaser.Scene {
     lineGfx.lineStyle(LINE_W, 0x3a2411, 0.92);
     for (const line of BOARD.lines) {
       for (let i = 0; i < line.length - 1; i++) {
-        const p1 = px(line[i]), p2 = px(line[i + 1]);
+        const p1 = px(line[i], false), p2 = px(line[i + 1], false);
         lineGfx.lineBetween(p1.x, p1.y, p2.x, p2.y);
       }
     }
     const jointGfx = this.add.graphics();
     jointGfx.fillStyle(0x2a1808, 1);
-    for (const id of ALL_IDS) { const p = px(id); jointGfx.fillCircle(p.x, p.y, JOINT_R); }
+    for (const id of ALL_IDS) { const p = px(id, false); jointGfx.fillCircle(p.x, p.y, JOINT_R); }
 
     this.highlightGfx = this.add.graphics().setDepth(1);
 
     for (const id of ALL_IDS) {
-      const p = px(id);
+      const p = px(id, game.flip);
       const piece = this.add.circle(p.x, p.y, PIECE_R, 0xffffff);
       piece.setStrokeStyle(PIECE_STROKE, 0x1a1208);
       piece.setDepth(3);
@@ -510,13 +767,23 @@ class MainScene extends Phaser.Scene {
   }
 
   setTurnText(t) { this.turnText.setText(t); }
+  setRoomCode(t) { this.roomCodeText.setText(t); }
   setCounts(b, r) { this.blueCountText.setText('নীল: '+b); this.redCountText.setText('লাল: '+r); }
+
+  /* game.flip পরিবর্তন হলে (অনলাইন রুম শুরু/শেষ হলে) সব গুটি ও hit-area নতুন পজিশনে সরানো হয় */
+  repositionForFlip() {
+    for (const id of ALL_IDS) {
+      const p = px(id, game.flip);
+      if (this.hitAreas[id]) this.hitAreas[id].setPosition(p.x, p.y);
+      if (this.pieceObjs[id]) this.pieceObjs[id].setPosition(p.x, p.y);
+    }
+  }
 
   fullRedraw() {
     for (const id of ALL_IDS) {
       const owner = game.fs.board[id];
       const piece = this.pieceObjs[id];
-      const p = px(id);
+      const p = px(id, game.flip);
       piece.setPosition(p.x, p.y);
       if (owner) { piece.visible = true; piece.setFillStyle(owner === 'blue' ? 0x2f6fe0 : 0xe03b3b); }
       else piece.visible = false;
@@ -530,14 +797,14 @@ class MainScene extends Phaser.Scene {
   showSelection(selId, moves) {
     this.clearHighlights();
     const g = this.highlightGfx;
-    const sp = px(selId);
+    const sp = px(selId, game.flip);
     g.lineStyle(SEL_STROKE, 0xffe066, 1);
     g.strokeCircle(sp.x, sp.y, SEL_R);
     g.fillStyle(0xffe066, 0.22);
     g.fillCircle(sp.x, sp.y, SEL_R);
     for (const m of moves) {
       if (m.type === 'stop') continue;
-      const dp = px(m.to);
+      const dp = px(m.to, game.flip);
       const color = m.type === 'capture' ? CAP_DEST_COLOR : MOVE_DEST_COLOR;
       g.lineStyle(DEST_STROKE, color, 1);
       g.strokeCircle(dp.x, dp.y, DEST_R);
@@ -547,7 +814,7 @@ class MainScene extends Phaser.Scene {
   }
 
   flashInvalid(id) {
-    const p = px(id);
+    const p = px(id, game.flip);
     const g = this.add.graphics().setDepth(5);
     g.lineStyle(SEL_STROKE, 0xff4444, 1);
     g.strokeCircle(p.x, p.y, SEL_R);
@@ -558,13 +825,13 @@ class MainScene extends Phaser.Scene {
     this.clearHighlights();
     if (mv.type === 'stop') { onDone(); return; }
     const piece = this.pieceObjs[mv.from];
-    const to = px(mv.to);
+    const to = px(mv.to, game.flip);
     this.tweens.add({
       targets: piece, x: to.x, y: to.y, duration: 280, ease: 'Quad.easeInOut',
       onComplete: () => {
         this.pieceObjs[mv.from] = this.pieceObjs[mv.to];
         this.pieceObjs[mv.to] = piece;
-        const p0 = px(mv.from);
+        const p0 = px(mv.from, game.flip);
         this.pieceObjs[mv.from].setPosition(p0.x, p0.y);
         this.pieceObjs[mv.from].visible = false;
         if (mv.type === 'capture') {
@@ -590,7 +857,7 @@ const config = {
 };
 
 /* ============================================================
-   6. UI wiring — mode & color selection overlay
+   6. UI wiring — মোড, রং, ও অনলাইন রুম নির্বাচন overlay
    ============================================================ */
 function buildStartOverlay() {
   const holder = document.getElementById('gameHolder');
@@ -603,7 +870,8 @@ function buildStartOverlay() {
     <p>প্রত্যেকের ১৬টি গুটি, মাঝের সারি ফাঁকা থেকে শুরু। ক্যাপচার ঐচ্ছিক — চাইলে অন্য গুটি নিয়েও চাল দিতে পারবেন।</p>
     <div class="choiceRow" id="modeRow">
       <div class="modeBtn" id="pickPvAI"><div class="modeIcon">🤖</div>Player vs AI</div>
-      <div class="modeBtn" id="pickPvP"><div class="modeIcon">🧑‍🤝‍🧑</div>Player vs Player</div>
+      <div class="modeBtn" id="pickPvP"><div class="modeIcon">🧑‍🤝‍🧑</div>Player vs Player (একই ডিভাইস)</div>
+      <div class="modeBtn" id="pickOnline"><div class="modeIcon">🌐</div>অনলাইন মাল্টিপ্লেয়ার</div>
     </div>
   `;
   holder.appendChild(overlay);
@@ -620,14 +888,80 @@ function buildStartOverlay() {
     document.getElementById('pickBlue').onclick = () => { overlay.remove(); startGame('pvai', 'blue', 'red'); };
     document.getElementById('pickRed').onclick = () => { overlay.remove(); startGame('pvai', 'red', 'blue'); };
   };
+  document.getElementById('pickOnline').onclick = () => showOnlineChoiceScreen(overlay);
+}
+
+function showOnlineChoiceScreen(overlay) {
+  overlay.innerHTML = `
+    <h2>অনলাইন খেলা</h2>
+    <p>বন্ধুর সাথে দূর থেকে খেলুন — একজন রুম তৈরি করবেন, আরেকজন কোড দিয়ে যোগ দেবেন। দুইজনই নিজের ডিভাইসে নিজের গুটি নিচে দেখবেন।</p>
+    <div class="choiceRow">
+      <div class="modeBtn" id="pickCreateRoom"><div class="modeIcon">➕</div>রুম তৈরি করুন</div>
+      <div class="modeBtn" id="pickJoinRoom"><div class="modeIcon">🔑</div>রুমে যোগ দিন</div>
+    </div>
+    <button class="secondary" id="backFromOnline" style="margin-top:16px;">⬅ ফিরে যান</button>
+  `;
+  document.getElementById('backFromOnline').onclick = buildStartOverlay;
+  document.getElementById('pickCreateRoom').onclick = () => showCreateColorScreen(overlay);
+  document.getElementById('pickJoinRoom').onclick = () => showJoinScreen(overlay);
+}
+
+function showCreateColorScreen(overlay) {
+  overlay.innerHTML = `
+    <h2>আপনার রং বেছে নিন</h2>
+    <p>আপনি যেই রং বেছে নেন, সেটি আপনার ডিভাইসে সবসময় নিচে দেখাবে। আপনার বন্ধুও নিজের রং নিজের স্ক্রিনে নিচে দেখবেন।</p>
+    <div class="choiceRow">
+      <div class="colorBtn" id="createBlue"><div class="swatch" style="background:#2f6fe0"></div>নীল</div>
+      <div class="colorBtn" id="createRed"><div class="swatch" style="background:#e03b3b"></div>লাল</div>
+    </div>
+    <button class="secondary" id="backFromColor" style="margin-top:16px;">⬅ ফিরে যান</button>
+  `;
+  document.getElementById('backFromColor').onclick = () => showOnlineChoiceScreen(overlay);
+  document.getElementById('createBlue').onclick = () => createOnlineRoom('blue', overlay);
+  document.getElementById('createRed').onclick = () => createOnlineRoom('red', overlay);
+}
+
+function showJoinScreen(overlay) {
+  overlay.innerHTML = `
+    <h2>রুম কোড দিন</h2>
+    <p>আপনার বন্ধুর কাছ থেকে পাওয়া কোডটি লিখুন।</p>
+    <input id="joinCodeInput" maxlength="6" placeholder="ABCDE">
+    <div class="choiceRow" style="margin-top:16px;">
+      <button id="joinRoomBtn">যোগ দিন</button>
+      <button class="secondary" id="backFromJoin">⬅ ফিরে যান</button>
+    </div>
+    <p id="joinError" style="color:#ff8a8a;"></p>
+  `;
+  document.getElementById('backFromJoin').onclick = () => showOnlineChoiceScreen(overlay);
+  document.getElementById('joinRoomBtn').onclick = () => {
+    const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+    if (!code) return;
+    joinOnlineRoom(code, overlay);
+  };
+}
+
+function showWaitingScreen(overlay, code) {
+  overlay.innerHTML = `
+    <h2>খেলোয়াড়ের অপেক্ষায়...</h2>
+    <p>এই কোডটি আপনার বন্ধুকে পাঠান:</p>
+    <div class="roomCodeBox">${code}</div>
+    <div class="choiceRow" style="margin-top:18px;">
+      <button class="secondary" id="cancelWait">বাতিল করুন</button>
+    </div>
+  `;
+  document.getElementById('cancelWait').onclick = () => { leaveOnlineRoom(); buildStartOverlay(); };
 }
 
 window.addEventListener('load', () => {
   new Phaser.Game(config);
   buildStartOverlay();
-  document.getElementById('newGameBtn').onclick = buildStartOverlay;
+  document.getElementById('newGameBtn').onclick = () => { leaveOnlineRoom(); buildStartOverlay(); };
   document.getElementById('undoBtn').onclick = undoLastTurn;
-  document.getElementById('stopBtn').onclick = () => { if (game.fs && game.fs.forced && !isAiTurn() && !game.busy) doMove({type:'stop'}); };
+  document.getElementById('stopBtn').onclick = () => {
+    if (!game.fs || !game.fs.forced || game.busy) return;
+    if (game.mode === 'online' ? game.fs.player !== game.myColor : isAiTurn()) return;
+    performMove({type:'stop'});
+  };
 });
 </script>
 </body>
